@@ -430,7 +430,7 @@ setup_unionfs() {
                 # it is a plain directory: do nothing
                 rofsstring="${image}=${roopt}:${rofsstring}"
                 rofslist="${image} ${rofslist}"
-            elif [ -f "$image" -o -l "$image" ]; then
+            elif [ -e "$image" ]; then
                 backdev=$(readlink "$image" || get_backing_device "$image")
                 fstype=$(get_fstype "${backdev}")
                 if [ "${fstype}" = "unknown" ]; then
