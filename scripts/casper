@@ -33,6 +33,8 @@ fi
 parse_cmdline() {
     for x in $(cat /proc/cmdline); do
         case $x in
+            casper-mount-options=*)
+                MOUNT_OPTIONS="${x#casper-mount-options=}" ;;
             showmounts|show-cow)
                 export SHOWMOUNTS='Yes' ;;
             persistent)
@@ -570,7 +572,7 @@ check_dev ()
     if is_supported_fs ${fstype}; then
         devuid=$(blkid -o value -s UUID "$devname")
         [ -n "$devuid" ] && grep -qs "\<$devuid\>" $tried && continue
-        mount -t ${fstype} -o ro,noatime "${devname}" $mountpoint || continue
+        mount -t ${fstype} -o "ro,noatime${MOUNT_OPTIONS:+,$MOUNT_OPTIONS}" "${devname}" $mountpoint || continue
         [ -n "$devuid" ] && echo "$devuid" >> $tried
         if is_casper_path $mountpoint && \
            ([ "$skip_uuid_check" ] || [ "$UUID" = "$devuid" ] || matches_uuid $mountpoint); then
