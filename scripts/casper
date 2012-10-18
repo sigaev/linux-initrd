@@ -53,6 +53,10 @@ parse_cmdline() {
                 UUID=${x#uuid=} ;;
             ignore_uuid)
                 UUID="" ;;
+            live-media=*)
+                LIVEMEDIA="${x#live-media=}"
+                export LIVEMEDIA
+                echo "export LIVEMEDIA=\"$LIVEMEDIA\"" >> /etc/casper.conf ;;
             live-media-path=*)
                 LIVE_MEDIA_PATH="${x#live-media-path=}"
                 export LIVE_MEDIA_PATH
@@ -61,6 +65,12 @@ parse_cmdline() {
                 export TORAM="Yes" ;;
             todisk=*)
                 export TODISK="${x#todisk=}" ;;
+            hostname=*)
+                export CMD_HOST="${x#hostname=}" ;;
+            userfullname=*)
+                export CMD_USERFULLNAME="${x#userfullname=}" ;;
+            username=*)
+                export CMD_USERNAME="${x#username=}" ;;
         esac
     done
     if [ "${UNIONFS}" = "" ]; then
@@ -133,7 +143,7 @@ mount_images_in_directory() {
 
 is_nice_device() {
     sysfs_path="${1#/sys}"
-    if /sbin/udevadm test-builtin path_id "${sysfs_path}" | egrep -q "ID_PATH=(usb|pci-[^-]*-(ide|sas|scsi|usb|virtio)|platform-sata_mv|platform-orion-ehci|platform-mmc|platform-mxsdhci|platform-omap_hsmmc|platform-sdhci-tegra)"; then
+    if /sbin/udevadm test-builtin path_id "${sysfs_path}" | egrep -q "ID_PATH=(usb|pci-[^-]*-(ide|sas|scsi|usb|virtio)|platform-sata_mv|platform-orion-ehci|platform-mmc|platform-mxsdhci|platform-omap_hsmmc|platform-sdhci-tegra|platform-tegra-ehci)"; then
         return 0
     fi
     if echo ${sysfs_path} | grep -q "^/block/dm-"; then
@@ -221,13 +231,15 @@ do_nfsmount() {
     modprobe "${MP_QUIET}" nfs
     if [ -z "${NFSOPTS}" ]; then
         NFSOPTS=""
+    else
+        NFSOPTS=",${NFSOPTS}"
     fi
 
     [ "$quiet" != "y" ] && log_begin_msg "Trying nfsmount -o nolock -o ro ${NFSOPTS} ${NFSROOT} ${mountpoint}"
     # FIXME: This while loop is an ugly HACK round an nfs bug
     i=0
     while [ "$i" -lt 60 ]; do
-        nfsmount -o nolock -o ro ${NFSOPTS} "${NFSROOT}" "${mountpoint}" && rc=0 && break
+        nfsmount -o nolock -o ro${NFSOPTS} "${NFSROOT}" "${mountpoint}" && rc=0 && break
         sleep 1
         i="$(($i + 1))"
     done
@@ -568,6 +580,20 @@ check_dev ()
     return 1
 }
 
+is_mapper() {
+    dev="$1"
+    # we don't consider control a mapper device
+    echo "$dev" |grep "/dev/mapper/control" >/dev/null && return 1
+    echo "$dev" |grep "/dev/mapper/.\+" >/dev/null && return 0
+    return 1
+}
+
+is_md() {
+    dev="$1"
+    echo "$dev" |grep "/dev/md[0-9]" >/dev/null && return 0
+    return 1
+}
+
 find_livefs() {
     timeout="${1}"
     # first look at the one specified in the command line
@@ -583,7 +609,7 @@ find_livefs() {
         fi
     fi
     # or do the scan of block devices
-    for sysblock in $(echo /sys/block/* | tr ' ' '\n' | egrep -v "/(loop|ram|fd)"); do
+    for sysblock in $(echo /sys/block/* | tr ' ' '\n' | egrep -v "/(loop|ram|fd|md)"); do
         devname=$(sys2dev "${sysblock}")
         [ -e "$devname" ] || continue
         fstype=$(get_fstype "${devname}")
@@ -597,6 +623,10 @@ find_livefs() {
                     return 0
                 fi
             done
+        elif is_md "${devname}" || is_mapper "${devname}" ; then
+            if check_dev "null" "${devname}" ; then
+                return 0
+            fi
         elif [ "${fstype}" = "squashfs" -o \
                 "${fstype}" = "ext4" -o \
                 "${fstype}" = "ext3" -o \
@@ -613,18 +643,6 @@ find_livefs() {
     return 1
 }
 
-set_usplash_timeout() {
-    if [ -x /sbin/usplash_write ]; then
-        /sbin/usplash_write "TIMEOUT 120"
-    fi
-}
-
-start_usplash_pulse() {
-    if [ -x /sbin/usplash_write ]; then
-        /sbin/usplash_write "PULSELOGO"
-    fi
-}
-
 mountroot() {
     exec 6>&1
     exec 7>&2
@@ -635,16 +653,9 @@ mountroot() {
 
     parse_cmdline
 
-    set_usplash_timeout
-    start_usplash_pulse
     [ "$quiet" != "y" ] && log_begin_msg "Running /scripts/casper-premount"
     run_scripts /scripts/casper-premount
     [ "$quiet" != "y" ] && log_end_msg
-
-    # Needed here too because some things (*cough* udev *cough*)
-    # changes the timeout
-
-    set_usplash_timeout
 
     if [ ! -z "${NETBOOT}" ]; then
         if do_netmount ; then
@@ -692,8 +703,16 @@ mountroot() {
             HOST=$FLAVOUR
             USERNAME=$FLAVOUR
             export HOST USERNAME
-            sed  -i "s,USERNAME=.*,USERNAME=\"$FLAVOUR\",g; s,HOST=.*,HOST=\"$FLAVOUR\",g" /etc/casper.conf
+            sed -i "s,USERNAME=.*,USERNAME=\"$FLAVOUR\",g; s,HOST=.*,HOST=\"$FLAVOUR\",g" /etc/casper.conf
         fi
+    fi
+
+    # Apply command lines override of HOST, USERNAME and USERFULLNAME
+    [ -n "$CMD_HOST" ] && HOST=$CMD_HOST && export HOST
+    [ -n "$CMD_USERNAME" ] && USERNAME=$CMD_USERNAME && export USERNAME
+    [ -n "$CMD_USERFULLNAME" ] && USERFULLNAME=$CMD_USERFULLNAME && export USERFULLNAME
+    if [ -n "$CMD_HOST" ] || [ -n "$CMD_USERNAME" ] || [ -n "$CMD_USERFULLNAME" ]; then
+        sed -i "s,USERNAME=.*,USERNAME=\"$USERNAME\",g; s,USERFULLNAME=.*,USERFULLNAME=\"$USERFULLNAME\",g; s,HOST=.*,HOST=\"$HOST\",g" /etc/casper.conf
     fi
 
     # unionfs-fuse needs /dev to be bind-mounted for the duration of
